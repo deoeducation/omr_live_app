@@ -10,7 +10,7 @@ from datetime import datetime
 def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choices=4):
     """
     A robust OMR scanning function built from scratch for the specific sheet layout.
-    It dynamically finds the answer block for improved accuracy.
+    It now finds the answer block by locating all answer bubbles first.
     """
     try:
         # 1. Decode Image from Bytes
@@ -57,45 +57,55 @@ def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choice
         dst = np.array([[0, 0], [maxWidth - 1, 0], [maxWidth - 1, maxHeight - 1], [0, maxHeight - 1]], dtype="float32")
         M = cv2.getPerspectiveTransform(rect, dst)
         warped = cv2.warpPerspective(img, M, (maxWidth, maxHeight))
-
-        # 5. Dynamically find the 'STUDENT RESPONSE' block
+        
+        # 5. Find the 'STUDENT RESPONSE' block by finding all bubbles first
         warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
         thresh = cv2.threshold(warped_gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
-        
-        # Find all contours in the warped image
-        all_contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        answer_block_contour = None
-        for c in all_contours:
-            x, y, w, h = cv2.boundingRect(c)
-            # The answer block is a large rectangle in the bottom half of the page
-            if (w > maxWidth * 0.8) and (h > maxHeight * 0.2) and (y > maxHeight * 0.5):
-                answer_block_contour = c
-                break
-        
-        if answer_block_contour is None:
-            return None, "Error: Could not automatically locate the 'STUDENT RESPONSE' block. The image may be too dark or blurry.", warped
 
-        # 6. Crop to the Answer Block
-        x, y, w, h = cv2.boundingRect(answer_block_contour)
+        all_contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        question_bubbles = []
+        for c in all_contours:
+            (x, y, w, h) = cv2.boundingRect(c)
+            aspect_ratio = w / float(h)
+            # Filter for bubble-like contours in the bottom 60% of the page
+            if 15 <= w <= 40 and 15 <= h <= 40 and 0.8 <= aspect_ratio <= 1.2 and y > maxHeight * 0.4:
+                question_bubbles.append(c)
+
+        total_bubbles_expected = questions * choices
+        if len(question_bubbles) < total_bubbles_expected * 0.9: # Allow for a few missed bubbles initially
+            msg = f"Error: Could not find enough answer bubbles ({len(question_bubbles)} found, 200 expected). The image may be too dark, blurry, or have shadows."
+            return None, msg, warped
+
+        # 6. Create a bounding box around all found bubbles to define the answer block
+        all_bubble_points = np.concatenate(question_bubbles)
+        x, y, w, h = cv2.boundingRect(all_bubble_points)
+
+        # Add some padding to the crop for better processing
+        padding = 10
+        x = max(0, x - padding)
+        y = max(0, y - padding)
+        w = min(warped.shape[1] - x, w + padding * 2)
+        h = min(warped.shape[0] - y, h + padding * 2)
+
         answer_block = warped[y:y+h, x:x+w]
         answer_block_thresh = thresh[y:y+h, x:x+w]
 
-        # 7. Find Bubbles within the Answer Block
+        # 7. Re-find bubbles within the now accurately cropped Answer Block for grading
         bubble_contours, _ = cv2.findContours(answer_block_thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        question_bubbles = []
+        final_question_bubbles = []
         for c in bubble_contours:
             (cx, cy, cw, ch) = cv2.boundingRect(c)
             aspect_ratio = cw / float(ch)
             if cw >= 15 and ch >= 15 and 0.8 <= aspect_ratio <= 1.2:
-                question_bubbles.append(c)
+                final_question_bubbles.append(c)
         
-        total_bubbles_expected = questions * choices
-        if len(question_bubbles) != total_bubbles_expected:
-            msg = f"Error: Found {len(question_bubbles)} bubbles, but expected {total_bubbles_expected}. Please retake the photo."
+        if len(final_question_bubbles) != total_bubbles_expected:
+            msg = f"Error: Found {len(final_question_bubbles)} bubbles in the isolated answer block, but expected {total_bubbles_expected}. Please retake the photo."
             return None, msg, answer_block
 
         # 8. Sort Bubbles based on the 5-column layout
-        bubbles_sorted_by_y = sorted(question_bubbles, key=lambda c: cv2.boundingRect(c)[1])
+        bubbles_sorted_by_y = sorted(final_question_bubbles, key=lambda c: cv2.boundingRect(c)[1])
         
         correct_count = 0
         results = {}
@@ -237,3 +247,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
