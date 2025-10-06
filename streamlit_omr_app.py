@@ -6,12 +6,12 @@ import pandas as pd
 import json
 import os
 from datetime import datetime
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 
 # --- UTILITY FUNCTION FOR IMAGE PROCESSING (TAILORED FOR YOUR OMR SHEET) ---
+# This function does not need to be changed.
 def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choices=4):
     """
-    This function is now tailored to the specific 5-column layout of your OMR sheet.
+    This function is tailored to the specific 5-column layout of your OMR sheet.
     """
     # 1. Read Image
     nparr = np.frombuffer(image_bytes, np.uint8)
@@ -59,9 +59,8 @@ def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choice
     M = cv2.getPerspectiveTransform(rect, dst)
     warped = cv2.warpPerspective(img, M, (maxWidth, maxHeight))
     
-    # 5. *** NEW: CROP TO THE 'STUDENT RESPONSE' AREA ***
+    # 5. Crop to the 'Student Response' area
     h, w = warped.shape[:2]
-    # These percentages are estimated from your OMR sheet image.
     y_start = int(h * 0.58)
     answer_block = warped[y_start:, :]
     
@@ -75,41 +74,31 @@ def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choice
     for c in contours:
         (x, y, w, h) = cv2.boundingRect(c)
         aspect_ratio = w / float(h)
-        # Filter for contours that are roughly circular/square
         if w >= 15 and h >= 15 and 0.8 <= aspect_ratio <= 1.2:
             question_bubbles.append(c)
     
     total_bubbles_expected = questions * choices
     if len(question_bubbles) != total_bubbles_expected:
-         return None, f"Error: Found {len(question_bubbles)} bubbles in the answer area, but expected {total_bubbles_expected}. Please ensure the image is clear and well-lit.", answer_block
+         return None, f"Error: Found {len(question_bubbles)} bubbles, but expected {total_bubbles_expected}. The image might be blurry or poorly lit.", answer_block
 
-    # 7. *** NEW: SORT BUBBLES ACCORDING TO THE 5-COLUMN LAYOUT ***
-    # Sort bubbles top-to-bottom to establish rows
+    # 7. Sort bubbles according to the 5-column layout
     bubbles_sorted_by_y = sorted(question_bubbles, key=lambda c: cv2.boundingRect(c)[1])
     
     correct_count = 0
     results = {}
     overlay_img = answer_block.copy()
 
-    # There are 10 rows of questions on the sheet
-    for i in range(10):
-        # Get the 20 bubbles for the current visual row (5 questions * 4 bubbles)
+    for i in range(10): # For each of the 10 rows
         start_idx = i * 20
         row_bubbles = bubbles_sorted_by_y[start_idx : start_idx + 20]
-        # Sort them left-to-right to handle the columns
         row_bubbles_sorted_by_x = sorted(row_bubbles, key=lambda c: cv2.boundingRect(c)[0])
 
-        # Process each of the 5 questions in that row
-        for j in range(5):
-            # Calculate the actual question number based on row (i) and column (j)
+        for j in range(5): # For each of the 5 question columns
             question_num = (i + 1) + (j * 10)
-            
-            # Get the 4 bubbles for this single question
             question_choices = row_bubbles_sorted_by_x[j*4 : (j+1)*4]
 
             marked_index = -1
             max_filled = 0
-            # Find the most filled bubble among the 4 choices
             for k, c in enumerate(question_choices):
                 mask = np.zeros(thresh.shape, dtype="uint8")
                 cv2.drawContours(mask, [c], -1, 255, -1)
@@ -121,7 +110,6 @@ def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choice
                     marked_index = k
             
             marked_answer = None
-            # Check if the marking is significant
             if marked_index != -1 and max_filled > (cv2.contourArea(question_choices[marked_index]) * sensitivity):
                 marked_answer = "ABCD"[marked_index]
 
@@ -129,7 +117,6 @@ def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choice
             correct_answer = answer_key.get(question_num_str)
             results[question_num_str] = marked_answer
 
-            # Draw feedback on the overlay
             target_contour = question_choices[marked_index]
             if marked_answer == correct_answer:
                 correct_count += 1
@@ -138,16 +125,6 @@ def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choice
                 cv2.drawContours(overlay_img, [target_contour], -1, (0, 0, 255), 3) # Red
 
     return {"results": results, "score": correct_count}, "Success", overlay_img
-
-
-# --- CLASS TO CAPTURE FRAMES FROM WEBRTC STREAM ---
-class FrameProcessor(VideoProcessorBase):
-    def __init__(self) -> None:
-        super().__init__()
-        self.captured_frame = None
-    def recv(self, frame):
-        self.captured_frame = frame.to_ndarray(format="bgr24")
-        return frame
 
 # --- STREAMLIT APP ---
 st.set_page_config(page_title='Live OMR Scanner', layout='wide')
@@ -175,64 +152,66 @@ except Exception as e:
     st.stop()
 
 st.success("Answer key loaded successfully!")
-st.subheader("Scan OMR Sheet using Rear Camera 📸")
+st.subheader("Scan OMR Sheet 📸")
 
-ctx = webrtc_streamer(
-    key="omr-scanner",
-    mode=WebRtcMode.SENDRECV,
-    video_processor_factory=FrameProcessor,
-    media_stream_constraints={
-        "video": {"facingMode": "environment"},
-        "audio": False,
-    },
-    video_html_attrs={"style": {"width": "100%", "height": "auto", "border": "1px solid #ddd"}},
+# *** NEW: Using st.file_uploader for reliable camera access on mobile ***
+# This replaces the entire streamlit-webrtc component.
+uploaded_file = st.file_uploader(
+    "Take Photo of OMR Sheet",
+    type=['jpg', 'jpeg', 'png'],
+    accept_multiple_files=False,
+    label_visibility="collapsed"
 )
 
-if st.button("Capture & Process Image", type="primary"):
-    if ctx.video_processor and ctx.video_processor.captured_frame is not None:
-        captured_image = ctx.video_processor.captured_frame
+if uploaded_file is not None:
+    with st.spinner("Processing OMR sheet... 🧠"):
+        img_bytes = uploaded_file.getvalue()
+        data, message, overlay_img = process_omr_sheet(img_bytes, answer_key, sensitivity)
+
+    if data:
+        st.success("OMR Sheet Processed Successfully! ✅")
+        results = data['results']
+        correct_count = data['score']
+        student_id = f"{teacher_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        st.subheader("Results")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write(f"**Student ID:** `{student_id}`")
+            st.metric(label="**Final Score**", value=f"{correct_count} / 50")
         
-        with st.spinner("Processing OMR sheet... 🧠"):
-            is_success, buffer = cv2.imencode(".jpg", captured_image)
-            if not is_success:
-                st.error("Could not encode captured image.")
-                st.stop()
-            img_bytes = buffer.tobytes()
-            data, message, overlay_img = process_omr_sheet(img_bytes, answer_key, sensitivity)
+        # Ensure columns are sorted correctly from 1 to 50 for the DataFrame
+        sorted_results = {str(k): results.get(str(k)) for k in range(1, 51)}
+        df_data_sorted = {"Student": student_id, **sorted_results, "Total Correct": correct_count}
+        df = pd.DataFrame([df_data_sorted])
+        filename = f"results/{subject}_{teacher_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        df.to_excel(filename, index=False)
+        
+        with col2:
+            st.write("📄 **Results saved to Excel**")
+            with open(filename, "rb") as file:
+                st.download_button(label="Download Results (.xlsx)", data=file, file_name=os.path.basename(filename))
 
-        if data:
-            st.success("OMR Sheet Processed Successfully! ✅")
-            results = data['results']
-            correct_count = data['score']
-            student_id = f"{teacher_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        st.dataframe(df)
 
-            st.subheader("Results")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write(f"**Student ID:** `{student_id}`")
-                st.metric(label="**Final Score**", value=f"{correct_count} / 50")
-            
-            df_data = {"Student": student_id, **results, "Total Correct": correct_count}
-            # Ensure columns are sorted correctly from 1 to 50
-            sorted_results = {str(k): results.get(str(k)) for k in range(1, 51)}
-            df_data_sorted = {"Student": student_id, **sorted_results, "Total Correct": correct_count}
-            df = pd.DataFrame([df_data_sorted])
-            filename = f"results/{subject}_{teacher_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            df.to_excel(filename, index=False)
-            
-            with col2:
-                st.write("📄 **Results saved to Excel**")
-                with open(filename, "rb") as file:
-                    st.download_button(label="Download Results (.xlsx)", data=file, file_name=os.path.basename(filename))
+        st.subheader("Debugging Overlay")
+        st.image(overlay_img, caption="Green = Correctly Marked, Red = Incorrectly Marked", channels="BGR")
 
-            st.dataframe(df)
-
-            st.subheader("Debugging Overlay")
-            st.image(overlay_img, caption="Green = Correctly Marked, Red = Incorrectly Marked", channels="BGR")
-
-        else:
-            st.error(f"Processing Failed: {message}")
-            if overlay_img is not None:
-                st.image(overlay_img, caption="Debugging Image", channels="BGR")
     else:
-        st.warning("Camera not ready. Please make sure the video stream is active and click 'Start' before capturing.")
+        st.error(f"Processing Failed: {message}")
+        if overlay_img is not None:
+            st.image(overlay_img, caption="Debugging Image", channels="BGR")
+
+---
+
+### ## Important: Update `requirements.txt`
+
+Since we are no longer using `streamlit-webrtc`, you should remove it from your `requirements.txt` file on GitHub. This keeps your app clean and efficient.
+
+Your `requirements.txt` should now look like this:
+```text
+streamlit
+opencv-python-headless
+numpy
+pandas
+openpyxl
