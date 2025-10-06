@@ -5,9 +5,10 @@ import pandas as pd
 import json
 import os
 from datetime import datetime
+from streamlit.components.v1 import html
 
 st.set_page_config(page_title='Live OMR Scanner', layout='wide')
-st.title("Live OMR Scanner — 50 Questions")
+st.title("Live OMR Scanner — 50 Questions (Rear Camera)")
 
 # Create results folder
 if not os.path.exists('results'):
@@ -46,13 +47,34 @@ if uploaded_key is not None:
             img = cv2.imdecode(data, cv2.IMREAD_COLOR)
             return img
 
-        # Session state to enable continuous scanning
+        # Session state for continuous scanning
         if "scan_next" not in st.session_state:
             st.session_state.scan_next = True
 
         if st.session_state.scan_next:
-            st.subheader("Scan OMR Sheet (hold phone in landscape)")
-            uploaded_file = st.camera_input("Take a photo of the OMR sheet")
+            st.subheader("Scan OMR Sheet (Rear Camera - Hold phone in landscape)")
+
+            # HTML input to open rear camera
+            html_code = """
+            <input type="file" accept="image/*" capture="environment" id="rearCam">
+            <script>
+            document.getElementById('rearCam').addEventListener('change', function(event){
+                const file = event.target.files[0];
+                if(file){
+                    const reader = new FileReader();
+                    reader.onload = function(e){
+                        const data_url = e.target.result;
+                        const streamlitEvent = new CustomEvent("onFileSelect", {detail: data_url});
+                        window.parent.document.dispatchEvent(streamlitEvent);
+                    }
+                    reader.readAsDataURL(file);
+                }
+            });
+            </script>
+            """
+            html(html_code, height=50)
+
+            uploaded_file = st.file_uploader("Take a photo of the OMR sheet", type=["png", "jpg", "jpeg"], key="omr_cam")
 
             if uploaded_file is not None:
                 img = read_image_from_bytes(uploaded_file.read())
@@ -62,6 +84,7 @@ if uploaded_key is not None:
                 results = {}
                 correct_count = 0
 
+                # Process 50 questions
                 for q, options in bubble_grid.items():
                     marked = None
                     for opt, coord in options.items():
@@ -70,7 +93,6 @@ if uploaded_key is not None:
                         if crop.size == 0:
                             continue
                         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                        # Adaptive Gaussian Threshold
                         thresh = cv2.adaptiveThreshold(
                             gray, 255,
                             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -98,8 +120,8 @@ if uploaded_key is not None:
                 st.success(f"Results saved: {filename}")
                 st.download_button("Download Results", data=open(filename, "rb").read(), file_name=filename)
 
-                # Optional overlay visualization
-                show_overlay = st.checkbox("Show detected bubbles overlay for debugging")
+                # Overlay for debugging
+                show_overlay = st.checkbox("Show detected bubbles overlay")
                 if show_overlay:
                     overlay_img = img.copy()
                     for q, opt_coord in bubble_grid.items():
@@ -109,7 +131,7 @@ if uploaded_key is not None:
                             cv2.circle(overlay_img, (x, y), r, color, 2)
                     st.image(overlay_img, channels="BGR", caption="Bubble Detection Overlay")
 
-                # Prepare for next scan
+                # Next scan
                 if st.button("Scan Next OMR"):
                     st.session_state.scan_next = True
                     st.experimental_rerun()
