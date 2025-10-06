@@ -65,7 +65,7 @@ if uploaded_key is not None:
             results = {}
             correct_count = 0
 
-            # Process 50 questions
+            # Process 50 questions with improved detection
             for q, options in bubble_grid.items():
                 marked = None
                 for opt, coord in options.items():
@@ -76,9 +76,12 @@ if uploaded_key is not None:
                     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
                     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
                     filled_ratio = 1 - (cv2.countNonZero(thresh) / thresh.size)
-                    if filled_ratio > 0.5:
+
+                    # Only consider significant filled area as marked
+                    if filled_ratio > 0.7 and cv2.countNonZero(thresh) > 50:
                         marked = opt
                         break
+
                 results[q] = marked
                 if marked == answer_key.get(q):
                     correct_count += 1
