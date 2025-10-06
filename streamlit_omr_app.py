@@ -10,7 +10,7 @@ from datetime import datetime
 # --- UTILITY FUNCTION FOR IMAGE PROCESSING (TAILORED FOR YOUR OMR SHEET) ---
 def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choices=4):
     """
-    This function is tailored to the specific 5-column layout of your OMR sheet.
+    This version includes a visual debugging tool to help align the answer block crop.
     """
     # 1. Read Image
     nparr = np.frombuffer(image_bytes, np.uint8)
@@ -58,9 +58,10 @@ def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choice
     M = cv2.getPerspectiveTransform(rect, dst)
     warped = cv2.warpPerspective(img, M, (maxWidth, maxHeight))
     
-    # 5. Crop to the 'Student Response' area
+    # 5. *** CROP TO THE 'STUDENT RESPONSE' AREA ***
     h, w = warped.shape[:2]
-    y_start = int(h * 0.58)
+    # !!! --- THIS IS THE LINE TO ADJUST --- !!!
+    y_start = int(h * 0.58) 
     answer_block = warped[y_start:, :]
     
     # 6. Process Bubbles within the Cropped Area
@@ -78,7 +79,11 @@ def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choice
     
     total_bubbles_expected = questions * choices
     if len(question_bubbles) != total_bubbles_expected:
-         return None, f"Error: Found {len(question_bubbles)} bubbles, but expected {total_bubbles_expected}. The image might be blurry or poorly lit.", answer_block
+        # --- NEW: Draw a red rectangle on the original warped image to show the crop area ---
+        debug_img = warped.copy()
+        cv2.rectangle(debug_img, (0, y_start), (w, h), (0, 0, 255), 10) # Draw a thick red rectangle
+        message = f"Error: Found {len(question_bubbles)} bubbles, but expected {total_bubbles_expected}. Adjust the 'y_start' crop position in the code."
+        return None, message, debug_img
 
     # 7. Sort bubbles according to the 5-column layout
     bubbles_sorted_by_y = sorted(question_bubbles, key=lambda c: cv2.boundingRect(c)[1])
@@ -154,10 +159,9 @@ except Exception as e:
 st.success("Answer key loaded successfully!")
 st.subheader("Scan OMR Sheet 📸")
 
-# Using st.file_uploader for reliable camera access on mobile
 uploaded_file = st.file_uploader(
     "Take Photo of OMR Sheet",
-    type=['jpg', 'jpeg', 'png'],  # <-- COMMA ADDED HERE
+    type=['jpg', 'jpeg', 'png'],
     accept_multiple_files=False,
     label_visibility="collapsed"
 )
@@ -179,7 +183,6 @@ if uploaded_file is not None:
             st.write(f"**Student ID:** `{student_id}`")
             st.metric(label="**Final Score**", value=f"{correct_count} / 50")
         
-        # Ensure columns are sorted correctly from 1 to 50 for the DataFrame
         sorted_results = {str(k): results.get(str(k)) for k in range(1, 51)}
         df_data_sorted = {"Student": student_id, **sorted_results, "Total Correct": correct_count}
         df = pd.DataFrame([df_data_sorted])
@@ -199,4 +202,5 @@ if uploaded_file is not None:
     else:
         st.error(f"Processing Failed: {message}")
         if overlay_img is not None:
-            st.image(overlay_img, caption="Debugging Image", channels="BGR")
+            # The debug image now shows the original with the red crop box
+            st.image(overlay_img, caption="Debugging Image: Red box shows the attempted crop area", channels="BGR")
