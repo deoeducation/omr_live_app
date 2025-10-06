@@ -8,10 +8,7 @@ import os
 from datetime import datetime
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 
-# --- UTILITY FUNCTIONS FOR IMAGE PROCESSING (SAME AS BEFORE) ---
-# (The process_omr_sheet function from the previous response goes here. 
-# It does not need to be changed. For brevity, it is not repeated here.)
-
+# --- UTILITY FUNCTION FOR IMAGE PROCESSING ---
 def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choices=4):
     """
     Main function to process the OMR sheet image from bytes.
@@ -44,7 +41,6 @@ def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choice
         return None, "Could not find the 4 corners of the OMR sheet. Please retake the photo with the full sheet in view.", None
 
     # 4. Apply Perspective Warp
-    # Order points: top-left, top-right, bottom-right, bottom-left
     pts = doc_contour.reshape(4, 2)
     rect = np.zeros((4, 2), dtype="float32")
     s = pts.sum(axis=1)
@@ -113,7 +109,8 @@ def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choice
                 marked_index = i
         
         marked_answer = None
-        if max_filled > (cv2.contourArea(row_contours[marked_index]) * sensitivity):
+        # Check if the marking is significant enough
+        if marked_index != -1 and max_filled > (cv2.contourArea(row_contours[marked_index]) * sensitivity):
              marked_answer = "ABCD"[marked_index]
 
         question_num_str = str(q + 1)
@@ -124,28 +121,26 @@ def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choice
         if marked_answer == correct_answer:
             correct_count += 1
             if marked_index != -1:
-                 cv2.drawContours(overlay_img, [row_contours[marked_index]], -1, (0, 255, 0), 3)
+                 cv2.drawContours(overlay_img, [row_contours[marked_index]], -1, (0, 255, 0), 3) # Green for correct
         else:
             if marked_index != -1:
-                cv2.drawContours(overlay_img, [row_contours[marked_index]], -1, (0, 0, 255), 3)
+                cv2.drawContours(overlay_img, [row_contours[marked_index]], -1, (0, 0, 255), 3) # Red for incorrect
 
     return {"results": results, "score": correct_count}, "Success", overlay_img
 
 
 # --- CLASS TO CAPTURE FRAMES FROM WEBRTC STREAM ---
-
 class FrameProcessor(VideoProcessorBase):
     def __init__(self) -> None:
         super().__init__()
         self.captured_frame = None
 
     def recv(self, frame):
-        # We just need to receive the frame and convert it to a NumPy array.
+        # Store the latest frame from the video stream
         self.captured_frame = frame.to_ndarray(format="bgr24")
         return frame
 
 # --- STREAMLIT APP ---
-
 st.set_page_config(page_title='Live OMR Scanner', layout='wide')
 st.title("Live OMR Scanner — 50 Questions")
 
@@ -181,13 +176,14 @@ ctx = webrtc_streamer(
     mode=WebRtcMode.SENDRECV,
     video_processor_factory=FrameProcessor,
     media_stream_constraints={
-        "video": {"facingMode": "environment"},  # This line requests the rear camera
+        "video": {"facingMode": "environment"},  # Request the rear camera
         "audio": False,
     },
-    video_html_attrs={"style": {"width": "100%", "border": "1px solid #ddd", "border-radius": "4px"}},
+    # This styling makes the camera view large and responsive
+    video_html_attrs={"style": {"width": "100%", "height": "auto", "border": "1px solid #ddd"}},
 )
 
-if st.button("Capture & Process Image"):
+if st.button("Capture & Process Image", type="primary"):
     if ctx.video_processor and ctx.video_processor.captured_frame is not None:
         captured_image = ctx.video_processor.captured_frame
         
@@ -237,4 +233,4 @@ if st.button("Capture & Process Image"):
             if overlay_img is not None:
                 st.image(overlay_img, caption="Warped image for debugging", channels="BGR")
     else:
-        st.warning("Camera not ready or no image captured. Please make sure the camera stream is active and try again.")
+        st.warning("Camera not ready. Please make sure the video stream is active and click 'Start' before capturing.")
