@@ -1,3 +1,4 @@
+# Save this code as app.py
 import streamlit as st
 import cv2
 import numpy as np
@@ -5,10 +6,148 @@ import pandas as pd
 import json
 import os
 from datetime import datetime
-from streamlit.components.v1 import html
+from operator import itemgetter
+
+# --- UTILITY FUNCTIONS FOR IMAGE PROCESSING ---
+
+def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choices=4):
+    """
+    Main function to process the OMR sheet image from bytes.
+    Finds the sheet, warps it, finds bubbles, and grades them.
+    """
+    # 1. Read Image
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        return None, "Could not decode image.", None
+
+    # 2. Preprocessing
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edged = cv2.Canny(blurred, 75, 200)
+
+    # 3. Find Document Contour
+    contours, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    doc_contour = None
+    if len(contours) > 0:
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)
+        for c in contours:
+            peri = cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+            if len(approx) == 4:
+                doc_contour = approx
+                break
+
+    if doc_contour is None:
+        return None, "Could not find the 4 corners of the OMR sheet. Please retake the photo with the full sheet in view.", None
+
+    # 4. Apply Perspective Warp
+    # Order points: top-left, top-right, bottom-right, bottom-left
+    pts = doc_contour.reshape(4, 2)
+    rect = np.zeros((4, 2), dtype="float32")
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+    
+    (tl, tr, br, bl) = rect
+    widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
+    widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
+    maxWidth = max(int(widthA), int(widthB))
+
+    heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
+    heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
+    maxHeight = max(int(heightA), int(heightB))
+    
+    dst = np.array([
+        [0, 0],
+        [maxWidth - 1, 0],
+        [maxWidth - 1, maxHeight - 1],
+        [0, maxHeight - 1]], dtype="float32")
+
+    M = cv2.getPerspectiveTransform(rect, dst)
+    warped = cv2.warpPerspective(img, M, (maxWidth, maxHeight))
+    warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+
+    # 5. Find Bubbles and Grade
+    # Apply adaptive thresholding to get a clean binary image
+    thresh = cv2.threshold(warped_gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+    
+    contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    question_contours = []
+    for c in contours:
+        (x, y, w, h) = cv2.boundingRect(c)
+        aspect_ratio = w / float(h)
+        # Filter for contours that are roughly circular/square and of a reasonable size
+        if w >= 20 and h >= 20 and 0.8 <= aspect_ratio <= 1.2:
+            question_contours.append(c)
+
+    if len(question_contours) < (questions * choices):
+         return None, f"Could not find enough bubbles. Found {len(question_contours)}, expected {questions * choices}. Try adjusting sensitivity or retaking the photo.", warped
+
+    # Sort contours from top to bottom
+    question_contours = sorted(question_contours, key=lambda c: cv2.boundingRect(c)[1])
+
+    correct_count = 0
+    results = {}
+    overlay_img = warped.copy()
+
+    # Group bubbles by question (row)
+    for q in range(questions):
+        # Get the contours for the current question (row)
+        start_index = q * choices
+        end_index = (q + 1) * choices
+        
+        # Sort the bubbles in the current row by their x-coordinate (left to right)
+        row_contours = sorted(question_contours[start_index:end_index], key=lambda c: cv2.boundingRect(c)[0])
+        
+        marked_index = -1
+        max_filled = 0
+
+        # Find the most filled bubble in the row
+        for i, c in enumerate(row_contours):
+            mask = np.zeros(thresh.shape, dtype="uint8")
+            cv2.drawContours(mask, [c], -1, 255, -1)
+            mask = cv2.bitwise_and(thresh, thresh, mask=mask)
+            total = cv2.countNonZero(mask)
+            
+            if total > max_filled:
+                max_filled = total
+                marked_index = i
+        
+        # Check if the marking is above sensitivity threshold
+        marked_answer = None
+        # This sensitivity logic is a bit different now; it's a ratio to the area of the bubble
+        # A simple pixel count is often sufficient after the initial filter
+        if max_filled > (cv2.contourArea(row_contours[marked_index]) * sensitivity):
+             marked_answer = "ABCD"[marked_index]
+
+        question_num_str = str(q + 1)
+        correct_answer = answer_key.get(question_num_str)
+        
+        results[question_num_str] = marked_answer
+        
+        if marked_answer == correct_answer:
+            correct_count += 1
+            # Draw green on the correct, marked answer
+            if marked_index != -1:
+                 cv2.drawContours(overlay_img, [row_contours[marked_index]], -1, (0, 255, 0), 3)
+        else:
+            # Draw red on the wrong, marked answer
+            if marked_index != -1:
+                cv2.drawContours(overlay_img, [row_contours[marked_index]], -1, (0, 0, 255), 3)
+
+
+    return {"results": results, "score": correct_count}, "Success", overlay_img
+
+
+# --- STREAMLIT APP ---
 
 st.set_page_config(page_title='Live OMR Scanner', layout='wide')
-st.title("Live OMR Scanner — 50 Questions (Rear Camera)")
+st.title("Live OMR Scanner — 50 Questions")
 
 # Create results folder
 if not os.path.exists('results'):
@@ -17,129 +156,89 @@ if not os.path.exists('results'):
 # Sidebar settings
 with st.sidebar:
     st.header("Settings")
-    teacher_name = st.text_input("Teacher Name", value="")
-    subject = st.selectbox("Subject", ["maths", "english", "hindi", "evs"])
-    sensitivity = st.slider("Bubble detection sensitivity", 0.5, 0.9, 0.6)
+    teacher_name = st.text_input("Teacher Name", value="Teacher")
+    subject = st.selectbox("Subject", ["Maths", "English", "Science", "History"])
+    sensitivity = st.slider("Bubble detection sensitivity", 0.1, 0.9, 0.3, 0.05, help="Lower value means a lighter mark can be detected.")
     st.markdown("---")
     uploaded_key = st.file_uploader("Upload answer_key.json", type=["json"])
 
-# Only proceed if answer key is uploaded
-if uploaded_key is not None:
-    try:
-        answer_key = json.load(uploaded_key)
-        st.success("Answer key loaded successfully!")
+if uploaded_key is None:
+    st.warning("Please upload your answer_key.json file to begin.")
+    st.info("""
+    Your `answer_key.json` should look like this:
+    ```json
+    {
+      "1": "A",
+      "2": "C",
+      "3": "D",
+      "4": "B",
+      "...": "...",
+      "50": "A"
+    }
+    ```
+    """)
+    st.stop()
 
-        # Bubble grid for 50 questions
-        bubble_grid = {}
-        for q in range(1, 51):
-            bubble_grid[str(q)] = {
-                "A": {"x":0.15, "y":0.05 + 0.018*q, "r":0.015},
-                "B": {"x":0.30, "y":0.05 + 0.018*q, "r":0.015},
-                "C": {"x":0.45, "y":0.05 + 0.018*q, "r":0.015},
-                "D": {"x":0.60, "y":0.05 + 0.018*q, "r":0.015}
-            }
+try:
+    answer_key = json.load(uploaded_key)
+except Exception as e:
+    st.error(f"Error reading the answer key: {e}")
+    st.stop()
 
-        def pct_to_px(coord, w, h):
-            return int(coord['x']*w), int(coord['y']*h), int(coord['r']*min(w,h))
+st.success("Answer key loaded successfully!")
+st.subheader("Scan OMR Sheet")
 
-        def read_image_from_bytes(file_bytes):
-            data = np.frombuffer(file_bytes, np.uint8)
-            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-            return img
+# Use st.camera_input for a more reliable camera experience
+img_file_buffer = st.camera_input("Take a picture of the OMR sheet (ensure all 4 corners are visible)")
 
-        # Session state for continuous scanning
-        if "scan_next" not in st.session_state:
-            st.session_state.scan_next = True
+if img_file_buffer is not None:
+    with st.spinner("Processing OMR sheet... 🧠"):
+        # Get image bytes
+        img_bytes = img_file_buffer.getvalue()
 
-        if st.session_state.scan_next:
-            st.subheader("Scan OMR Sheet (Rear Camera - Hold phone in landscape)")
+        # Process the image
+        data, message, overlay_img = process_omr_sheet(img_bytes, answer_key, sensitivity)
 
-            # HTML input to open rear camera
-            html_code = """
-            <input type="file" accept="image/*" capture="environment" id="rearCam">
-            <script>
-            document.getElementById('rearCam').addEventListener('change', function(event){
-                const file = event.target.files[0];
-                if(file){
-                    const reader = new FileReader();
-                    reader.onload = function(e){
-                        const data_url = e.target.result;
-                        const streamlitEvent = new CustomEvent("onFileSelect", {detail: data_url});
-                        window.parent.document.dispatchEvent(streamlitEvent);
-                    }
-                    reader.readAsDataURL(file);
-                }
-            });
-            </script>
-            """
-            html(html_code, height=50)
+    if data:
+        st.success("OMR Sheet Processed Successfully! ✅")
+        results = data['results']
+        correct_count = data['score']
 
-            uploaded_file = st.file_uploader("Take a photo of the OMR sheet", type=["png", "jpg", "jpeg"], key="omr_cam")
+        student_id = f"{teacher_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-            if uploaded_file is not None:
-                img = read_image_from_bytes(uploaded_file.read())
-                h, w = img.shape[:2]
+        st.subheader("Results")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write(f"**Student ID:** `{student_id}`")
+            st.metric(label="**Final Score**", value=f"{correct_count} / 50")
+        
+        # Save to Excel
+        df_data = {
+            "Student": student_id,
+            **results, # Unpack the results dictionary
+            "Total Correct": correct_count
+        }
+        df = pd.DataFrame([df_data])
+        filename = f"results/{subject}_{teacher_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        df.to_excel(filename, index=False)
+        
+        with col2:
+            st.write("📄 **Results saved to Excel**")
+            with open(filename, "rb") as file:
+                st.download_button(
+                    label="Download Results (.xlsx)",
+                    data=file,
+                    file_name=os.path.basename(filename),
+                    mime="application/vnd.ms-excel"
+                )
 
-                student_id = f"{teacher_name}_{datetime.now().strftime('%H%M%S')}"
-                results = {}
-                correct_count = 0
+        st.subheader("Answer Details")
+        st.dataframe(pd.DataFrame([results]))
 
-                # Process 50 questions
-                for q, options in bubble_grid.items():
-                    marked = None
-                    for opt, coord in options.items():
-                        x, y, r = pct_to_px(coord, w, h)
-                        crop = img[max(0,y-r):y+r, max(0,x-r):x+r]
-                        if crop.size == 0:
-                            continue
-                        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                        thresh = cv2.adaptiveThreshold(
-                            gray, 255,
-                            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                            cv2.THRESH_BINARY_INV,
-                            11, 2
-                        )
-                        filled_ratio = cv2.countNonZero(thresh) / thresh.size
-                        if filled_ratio > sensitivity:
-                            marked = opt
-                            break
-                    results[q] = marked
-                    if marked == answer_key.get(q):
-                        correct_count += 1
+        st.subheader("Debugging Overlay")
+        st.image(overlay_img, caption="Green = Correctly Marked, Red = Incorrectly Marked", channels="BGR")
 
-                # Show results
-                st.subheader("Results")
-                st.write(f"Student ID: {student_id}")
-                st.write(f"Total Correct: {correct_count} / 50")
-                st.dataframe(pd.DataFrame([results]))
-
-                # Save to Excel
-                df = pd.DataFrame([{**{"Student": student_id}, **results, "Total Correct": correct_count}])
-                filename = f"results/{subject}_{teacher_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-                df.to_excel(filename, index=False)
-                st.success(f"Results saved: {filename}")
-                st.download_button("Download Results", data=open(filename, "rb").read(), file_name=filename)
-
-                # Overlay for debugging
-                show_overlay = st.checkbox("Show detected bubbles overlay")
-                if show_overlay:
-                    overlay_img = img.copy()
-                    for q, opt_coord in bubble_grid.items():
-                        for opt, coord in opt_coord.items():
-                            x, y, r = pct_to_px(coord, w, h)
-                            color = (0,255,0) if results[q]==opt else (255,0,0)
-                            cv2.circle(overlay_img, (x, y), r, color, 2)
-                    st.image(overlay_img, channels="BGR", caption="Bubble Detection Overlay")
-
-                # Next scan
-                if st.button("Scan Next OMR"):
-                    st.session_state.scan_next = True
-                    st.experimental_rerun()
-
-                st.session_state.scan_next = False
-
-    except Exception as e:
-        st.error(f"Invalid JSON file: {e}")
-        st.stop()
-else:
-    st.warning("Please upload your answer_key.json first")
+    else:
+        st.error(f"Processing Failed: {message}")
+        if overlay_img is not None:
+            st.image(overlay_img, caption="Warped image for debugging", channels="BGR")
