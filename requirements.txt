@@ -3,3 +3,9 @@ opencv-python-headless
 numpy
 pandas
 openpyxl
+streamlit
+opencv-python-headless
+numpy
+pandas
+openpyxl
+streamlit-webrtc
