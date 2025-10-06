@@ -8,7 +8,6 @@ import os
 from datetime import datetime
 
 # --- UTILITY FUNCTION FOR IMAGE PROCESSING (TAILORED FOR YOUR OMR SHEET) ---
-# This function does not need to be changed.
 def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choices=4):
     """
     This function is tailored to the specific 5-column layout of your OMR sheet.
@@ -117,12 +116,13 @@ def process_omr_sheet(image_bytes, answer_key, sensitivity, questions=50, choice
             correct_answer = answer_key.get(question_num_str)
             results[question_num_str] = marked_answer
 
-            target_contour = question_choices[marked_index]
-            if marked_answer == correct_answer:
-                correct_count += 1
-                cv2.drawContours(overlay_img, [target_contour], -1, (0, 255, 0), 3) # Green
-            elif marked_answer is not None:
-                cv2.drawContours(overlay_img, [target_contour], -1, (0, 0, 255), 3) # Red
+            if marked_index != -1:
+                target_contour = question_choices[marked_index]
+                if marked_answer == correct_answer:
+                    correct_count += 1
+                    cv2.drawContours(overlay_img, [target_contour], -1, (0, 255, 0), 3) # Green
+                elif marked_answer is not None:
+                    cv2.drawContours(overlay_img, [target_contour], -1, (0, 0, 255), 3) # Red
 
     return {"results": results, "score": correct_count}, "Success", overlay_img
 
@@ -154,11 +154,10 @@ except Exception as e:
 st.success("Answer key loaded successfully!")
 st.subheader("Scan OMR Sheet 📸")
 
-# *** NEW: Using st.file_uploader for reliable camera access on mobile ***
-# This replaces the entire streamlit-webrtc component.
+# Using st.file_uploader for reliable camera access on mobile
 uploaded_file = st.file_uploader(
     "Take Photo of OMR Sheet",
-    type=['jpg', 'jpeg', 'png'],
+    type=['jpg', 'jpeg', 'png'],  # <-- COMMA ADDED HERE
     accept_multiple_files=False,
     label_visibility="collapsed"
 )
@@ -201,17 +200,3 @@ if uploaded_file is not None:
         st.error(f"Processing Failed: {message}")
         if overlay_img is not None:
             st.image(overlay_img, caption="Debugging Image", channels="BGR")
-
----
-
-### ## Important: Update `requirements.txt`
-
-Since we are no longer using `streamlit-webrtc`, you should remove it from your `requirements.txt` file on GitHub. This keeps your app clean and efficient.
-
-Your `requirements.txt` should now look like this:
-```text
-streamlit
-opencv-python-headless
-numpy
-pandas
-openpyxl
