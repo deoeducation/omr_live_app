@@ -5,7 +5,6 @@ import pandas as pd
 import json
 import os
 from datetime import datetime
-from PIL import Image
 
 st.set_page_config(page_title='Live OMR Scanner', layout='wide')
 st.title("Live OMR Scanner — 50 Questions")
@@ -14,11 +13,13 @@ st.title("Live OMR Scanner — 50 Questions")
 if not os.path.exists('results'):
     os.makedirs('results')
 
-# Sidebar for teacher and subject
+# Sidebar for teacher, subject, and sensitivity
 with st.sidebar:
     st.header("Settings")
     teacher_name = st.text_input("Teacher Name", value="")
     subject = st.selectbox("Subject", ["maths", "english", "hindi", "evs"])
+    st.markdown("---")
+    sensitivity = st.slider("Bubble detection sensitivity", 0.5, 0.9, 0.7)
     st.markdown("---")
     
     # Upload answer key
@@ -65,7 +66,7 @@ if uploaded_key is not None:
             results = {}
             correct_count = 0
 
-            # Process 50 questions with improved detection
+            # Process 50 questions with adaptive threshold and sensitivity
             for q, options in bubble_grid.items():
                 marked = None
                 for opt, coord in options.items():
@@ -74,11 +75,17 @@ if uploaded_key is not None:
                     if crop.size == 0:
                         continue
                     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                    filled_ratio = 1 - (cv2.countNonZero(thresh) / thresh.size)
+
+                    # Adaptive threshold to handle uneven lighting
+                    thresh = cv2.adaptiveThreshold(gray, 255,
+                                                   cv2.ADAPTIVE_THRESH_MEAN_C,
+                                                   cv2.THRESH_BINARY_INV,
+                                                   11, 2)
+
+                    filled_ratio = cv2.countNonZero(thresh) / thresh.size
 
                     # Only consider significant filled area as marked
-                    if filled_ratio > 0.7 and cv2.countNonZero(thresh) > 50:
+                    if filled_ratio > sensitivity:
                         marked = opt
                         break
 
@@ -98,6 +105,17 @@ if uploaded_key is not None:
             df.to_excel(filename, index=False)
             st.success(f"Results saved: {filename}")
             st.download_button("Download Results", data=open(filename, "rb").read(), file_name=filename)
+
+            # Optional: show bubble detection overlay for debugging
+            show_overlay = st.checkbox("Show detected bubbles overlay for debugging")
+            if show_overlay:
+                overlay_img = img.copy()
+                for q, opt_coord in bubble_grid.items():
+                    for opt, coord in opt_coord.items():
+                        x, y, r = pct_to_px(coord, w, h)
+                        color = (0,255,0) if results[q]==opt else (255,0,0)
+                        cv2.circle(overlay_img, (x, y), r, color, 2)
+                st.image(overlay_img, channels="BGR", caption="Bubble Detection Overlay")
 
     except Exception:
         st.error("Invalid JSON file")
