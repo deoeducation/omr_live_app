@@ -5,6 +5,7 @@ import pandas as pd
 import json
 import os
 from datetime import datetime
+from PIL import Image
 
 st.set_page_config(page_title='Live OMR Scanner', layout='wide')
 st.title("Live OMR Scanner — 50 Questions")
@@ -52,12 +53,15 @@ def read_image_from_bytes(file_bytes):
     img = cv2.imdecode(data, cv2.IMREAD_COLOR)
     return img
 
-# Camera input
-st.subheader("Scan OMR Sheet")
-img_file_buffer = st.camera_input("Hold the sheet in front of the camera")
+# Camera input replaced with rear camera file uploader
+st.subheader("Scan OMR Sheet (Rear Camera Recommended)")
+uploaded_file = st.file_uploader(
+    "Take a photo of the OMR sheet",
+    type=["png", "jpg", "jpeg"]
+)
 
-if img_file_buffer is not None:
-    img = read_image_from_bytes(img_file_buffer.read())
+if uploaded_file is not None:
+    img = read_image_from_bytes(uploaded_file.read())
     h, w = img.shape[:2]
 
     student_id = f"{teacher_name}_{datetime.now().strftime('%H%M%S')}"
